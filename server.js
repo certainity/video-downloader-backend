@@ -1,8 +1,4 @@
-/**
- * server.js (FULL FILE)
- * Fix: Use your own Cobalt instance (POST /) with the correct request body.
- */
-
+// server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -12,215 +8,202 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-const COBALT_BASE_URL = (process.env.COBALT_BASE_URL || '').trim().replace(/\/+$/, ''); // no trailing slash
-
-// Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-// Helper: extract YouTube ID (still used only for metadata + thumbnail)
-const extractYouTubeId = (url) => {
-  const match = url.match(
-    /(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/
-  );
-  return match ? match[1] : null;
+// ---- REQUIRED ----
+const COBALT_BASE_URL_RAW = process.env.COBALT_BASE_URL;
+if (!COBALT_BASE_URL_RAW) {
+  console.error('❌ Missing COBALT_BASE_URL env var');
+}
+const COBALT_BASE_URL = (COBALT_BASE_URL_RAW || '').replace(/\/+$/, ''); // remove trailing slashes
+const COBALT_ENDPOINT = `${COBALT_BASE_URL}/`; // Cobalt expects POST /
+
+const COBALT_HEADERS = {
+  // These 2 headers matter (very often the reason for invalid_body)
+  Accept: 'application/json',
+  'Content-Type': 'application/json',
 };
 
-// Helper: detect platform (simple)
-const detectPlatform = (url) => {
-  const u = (url || '').toLowerCase();
-  if (u.includes('youtube.com') || u.includes('youtu.be')) return 'YouTube';
-  if (u.includes('instagram.com')) return 'Instagram';
-  if (u.includes('facebook.com') || u.includes('fb.watch')) return 'Facebook';
-  if (u.includes('tiktok.com')) return 'TikTok';
-  if (u.includes('twitter.com') || u.includes('x.com')) return 'Twitter/X';
-  return 'Unknown';
-};
+function isValidHttpUrl(maybeUrl) {
+  try {
+    const u = new URL(maybeUrl);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
-// Helper: normalize quality into Cobalt's expected "videoQuality" (numbers only or "max")
-const normalizeQuality = (q) => {
-  if (!q) return '1080';
-  const s = String(q).toLowerCase().trim();
-  if (s === 'max' || s === 'best') return 'max';
-  // accept "1080p" or "1080"
-  const m = s.match(/\d+/);
-  return m ? m[0] : '1080';
-};
+function detectPlatform(inputUrl) {
+  try {
+    const host = new URL(inputUrl).hostname.toLowerCase();
+    if (host.includes('youtube.com') || host.includes('youtu.be')) return 'YouTube';
+    if (host.includes('instagram.com')) return 'Instagram';
+    if (host.includes('facebook.com') || host.includes('fb.watch')) return 'Facebook';
+    if (host.includes('tiktok.com')) return 'TikTok';
+    if (host.includes('twitter.com') || host.includes('x.com')) return 'Twitter/X';
+    return 'Unknown';
+  } catch {
+    return 'Unknown';
+  }
+}
 
 // Health
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
-    service: 'video-downloader-backend',
-    cobaltConfigured: Boolean(COBALT_BASE_URL),
-    cobaltBase: COBALT_BASE_URL || null,
-    time: new Date().toISOString(),
+    backend: 'video-downloader-backend',
+    cobalt: COBALT_BASE_URL || null,
   });
 });
 
-/**
- * Get video info (metadata) + build directDownload quality buttons
- * IMPORTANT CHANGE:
- * - We now build download URLs using the ORIGINAL URL:
- *   /api/download?url=<encoded>&quality=1080
- */
+// Fetch basic info + provide quality buttons (the actual download happens on /api/download)
 app.post('/api/video-info', async (req, res) => {
   try {
     const { url } = req.body || {};
-
-    if (!url || typeof url !== 'string' || !url.trim()) {
-      return res.status(400).json({ success: false, error: 'URL required' });
+    if (!url || !isValidHttpUrl(url)) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid URL.' });
     }
 
-    const cleanUrl = url.trim();
-    const platform = detectPlatform(cleanUrl);
+    const platform = detectPlatform(url);
 
-    // Default minimal metadata
+    // Lightweight metadata (works well for YouTube; others may be blank)
     let title = 'Video';
     let author = '';
     let thumbnail = '';
-    let note = '';
+    let duration = '';
 
-    // If YouTube, fetch oEmbed title/author
-    const ytId = extractYouTubeId(cleanUrl);
-    if (platform === 'YouTube' && ytId) {
-      thumbnail = `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
+    // YouTube oEmbed (no API key needed)
+    if (platform === 'YouTube') {
       try {
         const oembed = await axios.get('https://www.youtube.com/oembed', {
-          params: { url: cleanUrl, format: 'json' },
+          params: { url, format: 'json' },
           timeout: 15000,
         });
         title = oembed.data?.title || title;
         author = oembed.data?.author_name || author;
-      } catch (e) {
-        note = 'Could not fetch full metadata, but download may still work.';
+        thumbnail = oembed.data?.thumbnail_url || thumbnail;
+      } catch {
+        // ignore oEmbed failures
       }
-    } else {
-      // Non-YouTube: metadata might not be available from oEmbed
-      title = `${platform} Video`;
-      note = 'Metadata may be limited for this platform, but download can still work.';
     }
 
-    const encoded = encodeURIComponent(cleanUrl);
     const qualities = ['1080', '720', '480', '360'].map((q) => ({
       quality: `${q}p`,
       format: 'mp4',
-      url: `/api/download?url=${encoded}&quality=${q}`,
       directDownload: true,
+      url:
+        `/api/download?url=${encodeURIComponent(url)}` +
+        `&videoQuality=${q}` +
+        `&downloadMode=auto` +
+        `&youtubeVideoCodec=h264` +
+        `&youtubeVideoContainer=auto`,
     }));
 
     return res.json({
       success: true,
       platform,
       title,
-      thumbnail: thumbnail || 'https://via.placeholder.com/480x270/667eea/ffffff?text=Video',
-      duration: 'Available',
-      author: author || '',
+      author,
+      thumbnail,
+      duration,
       qualities,
-      note: note || '',
+      note:
+        platform === 'YouTube'
+          ? 'If YouTube blocks Render IPs you may need cookies/session (see note below).'
+          : '',
     });
   } catch (err) {
     console.error('video-info error:', err?.message);
-    return res.status(500).json({ success: false, error: 'Failed to fetch video info' });
+    res.status(500).json({ success: false, error: 'Server error while fetching info.' });
   }
 });
 
-/**
- * DOWNLOAD endpoint:
- * Calls YOUR cobalt instance at POST /
- * with correct body schema for v10+
- */
+// Main download endpoint: browser opens this => backend calls cobalt => redirect to real file url
 app.get('/api/download', async (req, res) => {
   try {
-    const url = (req.query.url || '').toString().trim();
-    const quality = normalizeQuality(req.query.quality);
-
     if (!COBALT_BASE_URL) {
       return res.status(500).json({
-        error: 'Server is missing COBALT_BASE_URL. Set it in Render env vars to your Cobalt instance URL.',
+        error: 'Server is missing COBALT_BASE_URL. Set it in Render env vars to your own cobalt instance URL.',
       });
     }
 
-    if (!url) {
-      return res.status(400).json({ error: 'url query param is required' });
+    const url = req.query.url;
+    const videoQuality = req.query.videoQuality; // "1080" etc
+    const downloadMode = req.query.downloadMode || 'auto'; // auto|audio|mute
+    const youtubeVideoCodec = req.query.youtubeVideoCodec || 'h264';
+    const youtubeVideoContainer = req.query.youtubeVideoContainer || 'auto';
+    const youtubeHLS = req.query.youtubeHLS === 'true'; // optional
+
+    if (!url || !isValidHttpUrl(url)) {
+      return res.status(400).json({ error: 'Invalid URL.' });
     }
 
-    const cobaltEndpoint = `${COBALT_BASE_URL}/`; // IMPORTANT: POST /
-    const requestBody = {
+    // IMPORTANT: only send fields that are defined (avoid invalid_body)
+    const body = {
       url,
-      videoQuality: quality,         // <-- correct key for v10+
-      downloadMode: 'auto',
-      // optional YouTube tuning (safe defaults)
-      youtubeVideoCodec: 'h264',
-      youtubeVideoContainer: 'auto',
+      downloadMode,
     };
 
-    const cobaltResp = await axios.post(cobaltEndpoint, requestBody, {
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
+    // Cobalt expects quality like "1080" or "max"
+    if (videoQuality) body.videoQuality = String(videoQuality).replace(/p$/i, '');
+
+    // YouTube options
+    if (youtubeVideoCodec) body.youtubeVideoCodec = youtubeVideoCodec;
+    if (youtubeVideoContainer) body.youtubeVideoContainer = youtubeVideoContainer;
+    if (youtubeHLS) body.youtubeHLS = true;
+
+    const cobaltResp = await axios.post(COBALT_ENDPOINT, body, {
+      headers: COBALT_HEADERS,
       timeout: 60000,
       validateStatus: () => true,
     });
 
-    // If not 200, show debug
-    if (cobaltResp.status !== 200) {
-      return res.status(500).json({
-        error: 'Failed to generate download link. Please try again.',
-        debug: {
-          cobalt: COBALT_BASE_URL,
-          status: cobaltResp.status,
-          sentBody: requestBody,
-          body: cobaltResp.data,
-        },
-      });
-    }
-
+    const statusCode = cobaltResp.status;
     const data = cobaltResp.data;
 
-    // Cobalt success statuses usually include: redirect / tunnel / picker / local-processing
-    if (!data || data.status === 'error') {
-      return res.status(500).json({
-        error: 'Failed to generate download link. Please try again.',
-        debug: {
-          cobalt: COBALT_BASE_URL,
-          sentBody: requestBody,
-          body: data,
-        },
+    // Cobalt success usually returns { status: "redirect"|"tunnel", url: "..." }
+    if (statusCode >= 200 && statusCode < 300 && data && data.url) {
+      if (data.status === 'redirect' || data.status === 'tunnel') {
+        return res.redirect(data.url);
+      }
+
+      // If picker/local-processing happens, return JSON so you can see why
+      return res.status(200).json({
+        success: true,
+        cobaltStatus: data.status,
+        cobaltResponse: data,
       });
     }
 
-    // Common case: redirect/tunnel provides a direct URL
-    if ((data.status === 'redirect' || data.status === 'tunnel') && data.url) {
-      return res.redirect(data.url);
-    }
-
-    // If picker, pick first item
-    if (data.status === 'picker' && Array.isArray(data.picker) && data.picker.length) {
-      const first = data.picker[0];
-      if (first?.url) return res.redirect(first.url);
-    }
-
-    // local-processing needs client-side ffmpeg; not supported in this simple backend
+    // Failure (return your existing debug style)
     return res.status(500).json({
-      error: 'Cobalt returned a response type that this backend does not handle.',
+      error: 'Failed to generate download link. Please try again.',
       debug: {
         cobalt: COBALT_BASE_URL,
-        sentBody: requestBody,
+        status: statusCode,
+        sentBody: body,
         body: data,
       },
     });
   } catch (err) {
-    console.error('download error:', err?.message);
-    return res.status(500).json({ error: 'Download failed', debug: { message: err?.message } });
+    const status = err?.response?.status;
+    const body = err?.response?.data;
+
+    return res.status(500).json({
+      error: 'Failed to generate download link. Please try again.',
+      debug: {
+        cobalt: COBALT_BASE_URL,
+        status,
+        body,
+        message: err?.message,
+      },
+    });
   }
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Video Downloader API running on port ${PORT}`);
-  console.log(`🧪 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🚀 Backend running on port ${PORT}`);
 });
 
 module.exports = app;
