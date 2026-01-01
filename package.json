@@ -1,18 +1,17 @@
 {
-  "name": "video-downloader-backend",
-  "version": "5.0.0",
-  "description": "The best video downloader backend using yt-dlp",
+  "name": "video-downloader-backend-rapidapi",
+  "version": "7.0.0",
+  "description": "Video downloader using RapidAPI - Most reliable solution!",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
-    "setup": "chmod +x setup.sh && ./setup.sh"
+    "dev": "nodemon server.js"
   },
   "keywords": [
     "video",
     "downloader",
     "youtube",
-    "yt-dlp"
+    "rapidapi"
   ],
   "author": "Ahmed",
   "license": "MIT",

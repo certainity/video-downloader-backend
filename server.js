@@ -1,12 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const fs = require('fs');
-const path = require('path');
 const axios = require('axios');
 
-const execPromise = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -14,35 +9,9 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Create downloads directory
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-if (!fs.existsSync(DOWNLOADS_DIR)) {
-  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-}
-
-// Clean up old files periodically
-const cleanupOldFiles = () => {
-  try {
-    const files = fs.readdirSync(DOWNLOADS_DIR);
-    const now = Date.now();
-    
-    files.forEach(file => {
-      const filePath = path.join(DOWNLOADS_DIR, file);
-      const stats = fs.statSync(filePath);
-      const fileAge = now - stats.mtimeMs;
-      
-      // Delete files older than 1 hour
-      if (fileAge > 3600000) {
-        fs.unlinkSync(filePath);
-        console.log(`Cleaned up old file: ${file}`);
-      }
-    });
-  } catch (error) {
-    console.error('Cleanup error:', error.message);
-  }
-};
-
-setInterval(cleanupOldFiles, 1800000); // Every 30 minutes
+// RapidAPI Configuration
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'YOUR_RAPIDAPI_KEY_HERE';
+const RAPIDAPI_HOST = 'youtube-video-download-info.p.rapidapi.com';
 
 // Helper to extract video ID
 const extractVideoId = (url) => {
@@ -58,26 +27,20 @@ const extractVideoId = (url) => {
   return null;
 };
 
-// Check if yt-dlp is installed
-const checkYtDlp = async () => {
-  try {
-    await execPromise('yt-dlp --version');
-    console.log('✅ yt-dlp is installed');
-    return true;
-  } catch (error) {
-    console.log('⚠️  yt-dlp not found, will use API fallback');
-    return false;
-  }
+// Format duration from seconds to MM:SS
+const formatDuration = (seconds) => {
+  if (!seconds) return 'Available';
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-let ytDlpAvailable = false;
-
 // Health check
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Video Downloader API is running',
-    ytdlp: ytDlpAvailable,
+    rapidapi: RAPIDAPI_KEY !== 'YOUR_RAPIDAPI_KEY_HERE',
     timestamp: new Date().toISOString()
   });
 });
@@ -96,255 +59,229 @@ app.post('/api/video-info', async (req, res) => {
     if (!videoId) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Invalid YouTube URL' 
+        error: 'Invalid YouTube URL. Please enter a valid YouTube video link.' 
       });
     }
 
-    console.log(`Fetching info for: ${videoId}`);
+    console.log(`Fetching info for video: ${videoId}`);
 
-    // Method 1: Try using yt-dlp if available
-    if (ytDlpAvailable) {
-      try {
-        const { stdout } = await execPromise(
-          `yt-dlp --dump-json "https://www.youtube.com/watch?v=${videoId}"`,
-          { timeout: 15000 }
-        );
-        
-        const info = JSON.parse(stdout);
-        
-        // Extract available formats
-        const formats = info.formats
-          .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
-          .filter(f => f.height)
-          .sort((a, b) => b.height - a.height);
+    // Check if API key is set
+    if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
+      return res.status(500).json({
+        success: false,
+        error: 'RapidAPI key not configured. Please set RAPIDAPI_KEY environment variable.',
+        setup: 'Get your free API key from https://rapidapi.com/ytjar/api/youtube-video-download-info'
+      });
+    }
 
-        const uniqueQualities = [...new Set(formats.map(f => `${f.height}p`))];
-        
-        const qualities = uniqueQualities.map(quality => ({
-          quality,
+    // Call RapidAPI
+    const options = {
+      method: 'GET',
+      url: 'https://youtube-video-download-info.p.rapidapi.com/dl',
+      params: { id: videoId },
+      headers: {
+        'X-RapidAPI-Key': RAPIDAPI_KEY,
+        'X-RapidAPI-Host': RAPIDAPI_HOST
+      },
+      timeout: 15000
+    };
+
+    const response = await axios.request(options);
+    const data = response.data;
+
+    console.log('RapidAPI Response:', JSON.stringify(data, null, 2));
+
+    if (!data || data.status !== 'ok') {
+      throw new Error('Failed to fetch video info from RapidAPI');
+    }
+
+    // Extract video information
+    const videoInfo = data;
+    const title = videoInfo.title || 'YouTube Video';
+    const thumbnail = videoInfo.thumb || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+    const author = videoInfo.author || 'YouTube Channel';
+    const duration = videoInfo.duration || 0;
+
+    // Extract download links
+    const qualities = [];
+    
+    if (videoInfo.link) {
+      // Format can be: mp4, 360, 480, 720, 1080, etc.
+      const formats = videoInfo.link;
+      
+      // Add available qualities
+      const qualityPriority = ['1080', '720', '480', '360', '240', '144'];
+      
+      qualityPriority.forEach(quality => {
+        if (formats[quality]) {
+          qualities.push({
+            quality: `${quality}p`,
+            format: 'mp4',
+            url: formats[quality][0] || formats[quality],
+            directDownload: true,
+            external: true
+          });
+        }
+      });
+
+      // Also check for 'mp4' format
+      if (formats.mp4 && qualities.length === 0) {
+        qualities.push({
+          quality: 'Best',
           format: 'mp4',
-          url: `/api/download?videoId=${videoId}&quality=${quality}`,
-          directDownload: true
-        }));
-
-        return res.json({
-          success: true,
-          platform: 'YouTube',
-          title: info.title,
-          thumbnail: info.thumbnail,
-          duration: formatDuration(info.duration),
-          author: info.uploader || info.channel,
-          videoId: videoId,
-          qualities: qualities.length > 0 ? qualities : getDefaultQualities(videoId),
-          note: 'Server-side download using yt-dlp'
+          url: Array.isArray(formats.mp4) ? formats.mp4[0] : formats.mp4,
+          directDownload: true,
+          external: true
         });
-
-      } catch (error) {
-        console.error('yt-dlp failed:', error.message);
       }
     }
 
-    // Method 2: Use YouTube oEmbed API
-    try {
-      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-      const response = await axios.get(oembedUrl, { timeout: 10000 });
-      const data = response.data;
-
+    // If no qualities found, return error
+    if (qualities.length === 0) {
       return res.json({
-        success: true,
-        platform: 'YouTube',
-        title: data.title,
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 'Available',
-        author: data.author_name,
-        videoId: videoId,
-        qualities: getDefaultQualities(videoId),
-        note: 'Click quality to download'
-      });
-
-    } catch (error) {
-      console.error('oEmbed failed:', error.message);
-      
-      // Fallback
-      return res.json({
-        success: true,
-        platform: 'YouTube',
-        title: 'YouTube Video',
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 'Available',
-        author: 'YouTube Channel',
-        videoId: videoId,
-        qualities: getDefaultQualities(videoId),
-        note: 'Video detected, click to download'
+        success: false,
+        error: 'No downloadable formats available for this video'
       });
     }
 
+    console.log(`Successfully fetched: ${title} with ${qualities.length} qualities`);
+
+    return res.json({
+      success: true,
+      platform: 'YouTube',
+      title: title,
+      thumbnail: thumbnail,
+      duration: formatDuration(duration),
+      author: author,
+      videoId: videoId,
+      qualities: qualities,
+      note: 'Direct download links from RapidAPI'
+    });
+
   } catch (error) {
-    console.error('Error:', error.message);
-    res.status(500).json({ 
+    console.error('Error fetching video info:', error.message);
+    
+    if (error.response) {
+      console.error('RapidAPI Error Response:', error.response.data);
+      
+      if (error.response.status === 429) {
+        return res.status(429).json({
+          success: false,
+          error: 'API rate limit exceeded. Please try again later or upgrade your RapidAPI plan.',
+          upgrade: 'Visit https://rapidapi.com to upgrade your plan'
+        });
+      }
+      
+      if (error.response.status === 403) {
+        return res.status(403).json({
+          success: false,
+          error: 'Invalid API key. Please check your RapidAPI key configuration.',
+          setup: 'Get your API key from https://rapidapi.com/ytjar/api/youtube-video-download-info'
+        });
+      }
+    }
+
+    return res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch video information' 
+      error: 'Failed to fetch video information. Please try again.',
+      details: error.message
     });
   }
 });
 
-// Download video
+// Download endpoint - redirect to direct link
 app.get('/api/download', async (req, res) => {
   try {
-    const { videoId, quality } = req.query;
+    const { videoId, quality, url } = req.query;
 
+    // If direct URL is provided, redirect to it
+    if (url) {
+      console.log(`Redirecting to download URL for quality: ${quality}`);
+      return res.redirect(url);
+    }
+
+    // Otherwise, fetch the video info again
     if (!videoId) {
-      return res.status(400).json({ error: 'Video ID required' });
+      return res.status(400).json({ error: 'Video ID or URL required' });
     }
 
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    console.log(`Starting download: ${videoId} at ${quality}`);
+    console.log(`Fetching download link for: ${videoId} at ${quality}`);
 
-    // Method 1: Try yt-dlp
-    if (ytDlpAvailable) {
-      try {
-        const qualityHeight = quality ? quality.replace('p', '') : '720';
-        const outputTemplate = path.join(DOWNLOADS_DIR, `${videoId}_%(height)sp.%(ext)s`);
-        
-        const command = `yt-dlp -f "bestvideo[height<=${qualityHeight}]+bestaudio/best[height<=${qualityHeight}]" --merge-output-format mp4 -o "${outputTemplate}" "${videoUrl}"`;
-        
-        console.log('Executing:', command);
-        const { stdout, stderr } = await execPromise(command, { timeout: 120000 });
-        
-        console.log('Download complete:', stdout);
-        
-        // Find the downloaded file
-        const files = fs.readdirSync(DOWNLOADS_DIR).filter(f => f.startsWith(videoId));
-        
-        if (files.length > 0) {
-          const filePath = path.join(DOWNLOADS_DIR, files[0]);
-          const stat = fs.statSync(filePath);
-          
-          res.setHeader('Content-Type', 'video/mp4');
-          res.setHeader('Content-Length', stat.size);
-          res.setHeader('Content-Disposition', `attachment; filename="video_${quality}.mp4"`);
-          
-          const stream = fs.createReadStream(filePath);
-          stream.pipe(res);
-          
-          stream.on('end', () => {
-            // Delete file after streaming
-            setTimeout(() => {
-              try {
-                fs.unlinkSync(filePath);
-              } catch (e) {
-                console.error('Failed to delete file:', e.message);
-              }
-            }, 5000);
-          });
-          
-          return;
-        }
-      } catch (error) {
-        console.error('yt-dlp download failed:', error.message);
-      }
+    if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
+      return res.status(500).json({
+        error: 'RapidAPI key not configured'
+      });
     }
 
-    // Method 2: Try using third-party API as fallback
-    try {
-      const apiResponse = await axios.post(
-        'https://api.vevioz.com/api/button/videos',
-        {
-          url: videoUrl
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000
-        }
-      );
+    const options = {
+      method: 'GET',
+      url: 'https://youtube-video-download-info.p.rapidapi.com/dl',
+      params: { id: videoId },
+      headers: {
+        'X-RapidAPI-Key': RAPIDAPI_KEY,
+        'X-RapidAPI-Host': RAPIDAPI_HOST
+      },
+      timeout: 15000
+    };
 
-      if (apiResponse.data && apiResponse.data.video && apiResponse.data.video.length > 0) {
-        // Find matching quality
-        const videos = apiResponse.data.video;
-        let selectedVideo = videos.find(v => v.quality === quality);
-        
-        if (!selectedVideo) {
-          selectedVideo = videos[0]; // Fallback to first available
-        }
+    const response = await axios.request(options);
+    const data = response.data;
 
-        if (selectedVideo && selectedVideo.url) {
-          return res.redirect(selectedVideo.url);
-        }
-      }
-    } catch (error) {
-      console.error('API fallback failed:', error.message);
+    if (!data || data.status !== 'ok' || !data.link) {
+      throw new Error('Failed to get download link');
     }
 
-    // If everything fails
-    res.status(503).json({ 
-      error: 'Download service temporarily unavailable. Please try again in a moment.',
-      suggestion: 'The server might be processing other requests. Please wait and retry.'
-    });
+    // Get the requested quality
+    const qualityNum = quality ? quality.replace('p', '') : '720';
+    const formats = data.link;
+    
+    let downloadUrl = null;
+    
+    if (formats[qualityNum]) {
+      downloadUrl = Array.isArray(formats[qualityNum]) ? formats[qualityNum][0] : formats[qualityNum];
+    } else if (formats.mp4) {
+      downloadUrl = Array.isArray(formats.mp4) ? formats.mp4[0] : formats.mp4;
+    }
+
+    if (!downloadUrl) {
+      return res.status(404).json({ error: 'Download link not available' });
+    }
+
+    console.log('Redirecting to:', downloadUrl);
+    res.redirect(downloadUrl);
 
   } catch (error) {
     console.error('Download error:', error.message);
     
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Download failed' });
+      res.status(500).json({ error: 'Download failed. Please try again.' });
     }
   }
 });
 
-// Helper functions
-const formatDuration = (seconds) => {
-  if (!seconds) return 'Available';
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  
-  if (hrs > 0) {
-    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  if (!res.headersSent) {
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
   }
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-};
+});
 
-const getDefaultQualities = (videoId) => {
-  return [
-    { 
-      quality: '1080p', 
-      format: 'mp4',
-      url: `/api/download?videoId=${videoId}&quality=1080p`,
-      directDownload: true
-    },
-    { 
-      quality: '720p', 
-      format: 'mp4',
-      url: `/api/download?videoId=${videoId}&quality=720p`,
-      directDownload: true
-    },
-    { 
-      quality: '480p', 
-      format: 'mp4',
-      url: `/api/download?videoId=${videoId}&quality=480p`,
-      directDownload: true
-    },
-    { 
-      quality: '360p', 
-      format: 'mp4',
-      url: `/api/download?videoId=${videoId}&quality=360p`,
-      directDownload: true
-    }
-  ];
-};
-
-// Initialize
-const init = async () => {
-  ytDlpAvailable = await checkYtDlp();
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 Video Downloader API running on port ${PORT}`);
+  console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🔑 RapidAPI Key: ${RAPIDAPI_KEY !== 'YOUR_RAPIDAPI_KEY_HERE' ? 'Configured ✅' : 'Not configured ❌'}`);
+  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   
-  app.listen(PORT, () => {
-    console.log(`🚀 Video Downloader API running on port ${PORT}`);
-    console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
-    console.log(`✅ yt-dlp: ${ytDlpAvailable ? 'Available' : 'Not available (using API fallback)'}`);
-  });
-};
-
-init();
+  if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
+    console.log('\n⚠️  WARNING: RapidAPI key not configured!');
+    console.log('Get your free API key from: https://rapidapi.com/ytjar/api/youtube-video-download-info');
+    console.log('Then set it as environment variable: RAPIDAPI_KEY=your_key_here\n');
+  }
+});
 
 module.exports = app;

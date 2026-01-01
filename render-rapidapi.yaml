@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: video-downloader-rapidapi
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: RAPIDAPI_KEY
+        sync: false  # You'll add this manually in Render dashboard
+    healthCheckPath: /api/health
