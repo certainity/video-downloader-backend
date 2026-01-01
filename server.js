@@ -9,9 +9,10 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// RapidAPI Configuration
+// RapidAPI Configuration - Based on your screenshot
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'YOUR_RAPIDAPI_KEY_HERE';
-const RAPIDAPI_HOST = 'youtube-video-download-info.p.rapidapi.com';
+const RAPIDAPI_HOST = 'youtube-video-download-api1.p.rapidapi.com';
+const API_ENDPOINT = 'https://youtube-video-download-api1.p.rapidapi.com/api/youtube';
 
 // Helper to extract video ID
 const extractVideoId = (url) => {
@@ -27,7 +28,7 @@ const extractVideoId = (url) => {
   return null;
 };
 
-// Format duration from seconds to MM:SS
+// Format duration
 const formatDuration = (seconds) => {
   if (!seconds) return 'Available';
   const mins = Math.floor(seconds / 60);
@@ -41,6 +42,7 @@ app.get('/api/health', (req, res) => {
     status: 'OK', 
     message: 'Video Downloader API is running',
     rapidapi: RAPIDAPI_KEY !== 'YOUR_RAPIDAPI_KEY_HERE',
+    host: RAPIDAPI_HOST,
     timestamp: new Date().toISOString()
   });
 });
@@ -63,80 +65,130 @@ app.post('/api/video-info', async (req, res) => {
       });
     }
 
-    console.log(`Fetching info for video: ${videoId}`);
+    console.log(`\n=== Fetching Video Info ===`);
+    console.log(`Video ID: ${videoId}`);
 
     // Check if API key is set
     if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
       return res.status(500).json({
         success: false,
-        error: 'RapidAPI key not configured. Please set RAPIDAPI_KEY environment variable.',
-        setup: 'Get your free API key from https://rapidapi.com/ytjar/api/youtube-video-download-info'
+        error: 'RapidAPI key not configured. Please set RAPIDAPI_KEY environment variable.'
       });
     }
 
-    // Call RapidAPI
+    // Construct full YouTube URL for the API
+    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    
+    console.log(`YouTube URL: ${youtubeUrl}`);
+    console.log(`API Endpoint: ${API_ENDPOINT}`);
+    console.log(`API Key: ${RAPIDAPI_KEY.substring(0, 10)}...`);
+
+    // Call RapidAPI with correct format
     const options = {
       method: 'GET',
-      url: 'https://youtube-video-download-info.p.rapidapi.com/dl',
-      params: { id: videoId },
+      url: API_ENDPOINT,
+      params: {
+        url: youtubeUrl
+      },
       headers: {
         'X-RapidAPI-Key': RAPIDAPI_KEY,
         'X-RapidAPI-Host': RAPIDAPI_HOST
       },
-      timeout: 15000
+      timeout: 25000
     };
 
+    console.log('Making API request...');
     const response = await axios.request(options);
     const data = response.data;
 
-    console.log('RapidAPI Response:', JSON.stringify(data, null, 2));
+    console.log('API Response Status:', response.status);
+    console.log('API Response Data:', JSON.stringify(data, null, 2));
 
-    if (!data || data.status !== 'ok') {
-      throw new Error('Failed to fetch video info from RapidAPI');
-    }
+    // Parse the response based on actual API structure
+    let title, thumbnail, author, duration, qualities = [];
 
-    // Extract video information
-    const videoInfo = data;
-    const title = videoInfo.title || 'YouTube Video';
-    const thumbnail = videoInfo.thumb || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
-    const author = videoInfo.author || 'YouTube Channel';
-    const duration = videoInfo.duration || 0;
+    // Try different possible response structures
+    if (data.title) {
+      title = data.title;
+      thumbnail = data.thumbnail || data.thumb || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+      author = data.author || data.channel || data.uploader || 'YouTube Channel';
+      duration = data.duration || data.lengthSeconds || 0;
 
-    // Extract download links
-    const qualities = [];
-    
-    if (videoInfo.link) {
-      // Format can be: mp4, 360, 480, 720, 1080, etc.
-      const formats = videoInfo.link;
-      
-      // Add available qualities
-      const qualityPriority = ['1080', '720', '480', '360', '240', '144'];
-      
-      qualityPriority.forEach(quality => {
-        if (formats[quality]) {
+      // Extract formats/qualities
+      if (data.formats && Array.isArray(data.formats)) {
+        console.log(`Found ${data.formats.length} formats`);
+        
+        // Filter and sort formats
+        const videoFormats = data.formats
+          .filter(f => f.url && f.hasVideo && f.hasAudio)
+          .sort((a, b) => (b.height || 0) - (a.height || 0));
+
+        // Get unique qualities
+        const qualityMap = new Map();
+        videoFormats.forEach(format => {
+          const height = format.height || format.quality;
+          const qualityLabel = format.qualityLabel || `${height}p`;
+          
+          if (!qualityMap.has(qualityLabel) && format.url) {
+            qualityMap.set(qualityLabel, {
+              quality: qualityLabel,
+              format: 'mp4',
+              url: format.url,
+              directDownload: true,
+              size: format.contentLength
+            });
+          }
+        });
+
+        qualities = Array.from(qualityMap.values());
+      } else if (data.links || data.downloadLinks) {
+        // Alternative structure
+        const links = data.links || data.downloadLinks;
+        Object.keys(links).forEach(key => {
+          const link = links[key];
+          if (link && link.url) {
+            qualities.push({
+              quality: link.quality || key,
+              format: 'mp4',
+              url: link.url,
+              directDownload: true
+            });
+          }
+        });
+      }
+    } else if (data.status === 'ok' && data.link) {
+      // Another possible structure
+      title = data.title || 'YouTube Video';
+      thumbnail = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+      author = data.author || 'YouTube Channel';
+      duration = data.duration || 0;
+
+      Object.keys(data.link).forEach(quality => {
+        const url = Array.isArray(data.link[quality]) 
+          ? data.link[quality][0] 
+          : data.link[quality];
+        
+        if (url) {
           qualities.push({
-            quality: `${quality}p`,
+            quality: quality.includes('p') ? quality : `${quality}p`,
             format: 'mp4',
-            url: formats[quality][0] || formats[quality],
-            directDownload: true,
-            external: true
+            url: url,
+            directDownload: true
           });
         }
       });
-
-      // Also check for 'mp4' format
-      if (formats.mp4 && qualities.length === 0) {
-        qualities.push({
-          quality: 'Best',
-          format: 'mp4',
-          url: Array.isArray(formats.mp4) ? formats.mp4[0] : formats.mp4,
-          directDownload: true,
-          external: true
-        });
-      }
     }
 
-    // If no qualities found, return error
+    // If still no data, try to parse whatever we got
+    if (!title) {
+      console.error('Unexpected API response structure:', data);
+      return res.status(500).json({
+        success: false,
+        error: 'Unexpected API response format',
+        debug: JSON.stringify(data).substring(0, 200)
+      });
+    }
+
     if (qualities.length === 0) {
       return res.json({
         success: false,
@@ -144,7 +196,8 @@ app.post('/api/video-info', async (req, res) => {
       });
     }
 
-    console.log(`Successfully fetched: ${title} with ${qualities.length} qualities`);
+    console.log(`✅ Successfully fetched: ${title}`);
+    console.log(`✅ Found ${qualities.length} qualities`);
 
     return res.json({
       success: true,
@@ -155,133 +208,82 @@ app.post('/api/video-info', async (req, res) => {
       author: author,
       videoId: videoId,
       qualities: qualities,
-      note: 'Direct download links from RapidAPI'
+      note: 'Direct download from RapidAPI'
     });
 
   } catch (error) {
-    console.error('Error fetching video info:', error.message);
+    console.error('\n=== ERROR ===');
+    console.error('Error Message:', error.message);
     
     if (error.response) {
-      console.error('RapidAPI Error Response:', error.response.data);
-      
-      if (error.response.status === 429) {
-        return res.status(429).json({
-          success: false,
-          error: 'API rate limit exceeded. Please try again later or upgrade your RapidAPI plan.',
-          upgrade: 'Visit https://rapidapi.com to upgrade your plan'
-        });
-      }
+      console.error('Response Status:', error.response.status);
+      console.error('Response Data:', JSON.stringify(error.response.data, null, 2));
       
       if (error.response.status === 403) {
         return res.status(403).json({
           success: false,
-          error: 'Invalid API key. Please check your RapidAPI key configuration.',
-          setup: 'Get your API key from https://rapidapi.com/ytjar/api/youtube-video-download-info'
+          error: 'Invalid API key or not subscribed to this API.',
+          details: 'Please check: 1) Your API key is correct, 2) You are subscribed to the YouTube Video Download API on RapidAPI',
+          apiKey: `${RAPIDAPI_KEY.substring(0, 10)}...`,
+          host: RAPIDAPI_HOST
+        });
+      }
+      
+      if (error.response.status === 429) {
+        return res.status(429).json({
+          success: false,
+          error: 'API rate limit exceeded. Please wait or upgrade your plan.'
+        });
+      }
+
+      if (error.response.status === 404) {
+        return res.status(404).json({
+          success: false,
+          error: 'API endpoint not found. The API structure may have changed.',
+          endpoint: API_ENDPOINT
         });
       }
     }
 
     return res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch video information. Please try again.',
+      error: 'Failed to fetch video information',
       details: error.message
     });
   }
 });
 
-// Download endpoint - redirect to direct link
+// Download endpoint
 app.get('/api/download', async (req, res) => {
   try {
-    const { videoId, quality, url } = req.query;
+    const { url } = req.query;
 
-    // If direct URL is provided, redirect to it
-    if (url) {
-      console.log(`Redirecting to download URL for quality: ${quality}`);
-      return res.redirect(url);
+    if (!url) {
+      return res.status(400).json({ error: 'Download URL required' });
     }
 
-    // Otherwise, fetch the video info again
-    if (!videoId) {
-      return res.status(400).json({ error: 'Video ID or URL required' });
-    }
-
-    console.log(`Fetching download link for: ${videoId} at ${quality}`);
-
-    if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
-      return res.status(500).json({
-        error: 'RapidAPI key not configured'
-      });
-    }
-
-    const options = {
-      method: 'GET',
-      url: 'https://youtube-video-download-info.p.rapidapi.com/dl',
-      params: { id: videoId },
-      headers: {
-        'X-RapidAPI-Key': RAPIDAPI_KEY,
-        'X-RapidAPI-Host': RAPIDAPI_HOST
-      },
-      timeout: 15000
-    };
-
-    const response = await axios.request(options);
-    const data = response.data;
-
-    if (!data || data.status !== 'ok' || !data.link) {
-      throw new Error('Failed to get download link');
-    }
-
-    // Get the requested quality
-    const qualityNum = quality ? quality.replace('p', '') : '720';
-    const formats = data.link;
-    
-    let downloadUrl = null;
-    
-    if (formats[qualityNum]) {
-      downloadUrl = Array.isArray(formats[qualityNum]) ? formats[qualityNum][0] : formats[qualityNum];
-    } else if (formats.mp4) {
-      downloadUrl = Array.isArray(formats.mp4) ? formats.mp4[0] : formats.mp4;
-    }
-
-    if (!downloadUrl) {
-      return res.status(404).json({ error: 'Download link not available' });
-    }
-
-    console.log('Redirecting to:', downloadUrl);
-    res.redirect(downloadUrl);
+    console.log(`Redirecting to: ${url.substring(0, 50)}...`);
+    res.redirect(url);
 
   } catch (error) {
     console.error('Download error:', error.message);
-    
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Download failed. Please try again.' });
+      res.status(500).json({ error: 'Download failed' });
     }
-  }
-});
-
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  if (!res.headersSent) {
-    res.status(500).json({ 
-      success: false, 
-      error: 'Internal server error' 
-    });
   }
 });
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Video Downloader API running on port ${PORT}`);
-  console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔑 RapidAPI Key: ${RAPIDAPI_KEY !== 'YOUR_RAPIDAPI_KEY_HERE' ? 'Configured ✅' : 'Not configured ❌'}`);
+  console.log('\n================================');
+  console.log('🚀 Video Downloader API');
+  console.log('================================');
+  console.log(`📡 Server: http://localhost:${PORT}`);
+  console.log(`📝 Health: http://localhost:${PORT}/api/health`);
+  console.log(`🔑 API Key: ${RAPIDAPI_KEY !== 'YOUR_RAPIDAPI_KEY_HERE' ? '✅ Configured' : '❌ Not configured'}`);
+  console.log(`🌐 API Host: ${RAPIDAPI_HOST}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  
-  if (RAPIDAPI_KEY === 'YOUR_RAPIDAPI_KEY_HERE') {
-    console.log('\n⚠️  WARNING: RapidAPI key not configured!');
-    console.log('Get your free API key from: https://rapidapi.com/ytjar/api/youtube-video-download-info');
-    console.log('Then set it as environment variable: RAPIDAPI_KEY=your_key_here\n');
-  }
+  console.log('================================\n');
 });
 
 module.exports = app;
