@@ -1,9 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execPromise = promisify(exec);
+const ytdl = require('ytdl-core');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -12,25 +11,49 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Helper to extract video ID from various platforms
+// Create downloads directory
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+  fs.mkdirSync(DOWNLOADS_DIR);
+}
+
+// Clean up old files (older than 1 hour)
+const cleanupOldFiles = () => {
+  const files = fs.readdirSync(DOWNLOADS_DIR);
+  const now = Date.now();
+  
+  files.forEach(file => {
+    const filePath = path.join(DOWNLOADS_DIR, file);
+    const stats = fs.statSync(filePath);
+    const fileAge = now - stats.mtimeMs;
+    
+    // Delete files older than 1 hour
+    if (fileAge > 3600000) {
+      fs.unlinkSync(filePath);
+      console.log(`Deleted old file: ${file}`);
+    }
+  });
+};
+
+// Run cleanup every 30 minutes
+setInterval(cleanupOldFiles, 1800000);
+
+// Helper to extract video ID
 const extractVideoId = (url) => {
-  // YouTube
-  const ytMatch = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/);
-  if (ytMatch) return { platform: 'youtube', id: ytMatch[1] };
+  const match = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/);
+  return match ? match[1] : null;
+};
 
-  // Instagram
-  const igMatch = url.match(/instagram\.com\/(?:p|reel|tv)\/([^/?#]+)/);
-  if (igMatch) return { platform: 'instagram', id: igMatch[1] };
-
-  // TikTok
-  const ttMatch = url.match(/tiktok\.com\/.*\/video\/(\d+)/);
-  if (ttMatch) return { platform: 'tiktok', id: ttMatch[1] };
-
-  // Facebook
-  const fbMatch = url.match(/facebook\.com/);
-  if (fbMatch) return { platform: 'facebook', id: 'fb' };
-
-  return null;
+// Helper to format duration
+const formatDuration = (seconds) => {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
 // Health check
@@ -38,7 +61,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Video Downloader API is running' });
 });
 
-// Get video info and download links
+// Get video info
 app.post('/api/video-info', async (req, res) => {
   try {
     const { url } = req.body;
@@ -47,144 +70,92 @@ app.post('/api/video-info', async (req, res) => {
       return res.status(400).json({ success: false, error: 'URL is required' });
     }
 
-    const videoInfo = extractVideoId(url);
-    
-    if (!videoInfo) {
+    // Validate YouTube URL
+    if (!ytdl.validateURL(url)) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Invalid or unsupported URL. Please use YouTube, Instagram, TikTok, or Facebook links.' 
+        error: 'Invalid YouTube URL. Please make sure it\'s a valid YouTube video link.' 
       });
     }
 
-    // Method 1: Try using Y2Mate API (free alternative)
-    if (videoInfo.platform === 'youtube') {
-      try {
-        const videoId = videoInfo.id;
-        
-        // Get video info from YouTube oEmbed
-        const oembedResponse = await axios.get(
-          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
-          { timeout: 10000 }
-        );
-
-        const title = oembedResponse.data.title || 'YouTube Video';
-        const author = oembedResponse.data.author_name || 'YouTube Channel';
-
-        // Return video info with download endpoints
-        return res.json({
-          success: true,
-          platform: 'YouTube',
-          title: title,
-          thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-          duration: 'Available',
-          author: author,
-          videoId: videoId,
-          qualities: [
-            { 
-              quality: '1080p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=1080`,
-              directDownload: true
-            },
-            { 
-              quality: '720p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=720`,
-              directDownload: true
-            },
-            { 
-              quality: '480p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=480`,
-              directDownload: true
-            },
-            { 
-              quality: '360p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=360`,
-              directDownload: true
-            }
-          ],
-          downloadUrl: `/api/download?videoId=${videoId}&quality=1080`,
-          method: 'proxy',
-          note: 'Click any quality to download'
-        });
-
-      } catch (error) {
-        console.error('YouTube oEmbed Error:', error.message);
-        
-        // Fallback response even if oEmbed fails
-        const videoId = videoInfo.id;
-        return res.json({
-          success: true,
-          platform: 'YouTube',
-          title: 'YouTube Video',
-          thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-          duration: 'Available',
-          author: 'YouTube Channel',
-          videoId: videoId,
-          qualities: [
-            { 
-              quality: '1080p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=1080`,
-              directDownload: true
-            },
-            { 
-              quality: '720p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=720`,
-              directDownload: true
-            },
-            { 
-              quality: '480p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=480`,
-              directDownload: true
-            },
-            { 
-              quality: '360p', 
-              format: 'mp4',
-              url: `/api/download?videoId=${videoId}&quality=360`,
-              directDownload: true
-            }
-          ],
-          downloadUrl: `/api/download?videoId=${videoId}&quality=1080`,
-          method: 'proxy',
-          note: 'Click any quality to download'
-        });
-      }
+    const videoId = extractVideoId(url);
+    
+    if (!videoId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Could not extract video ID from URL' 
+      });
     }
 
-    // For other platforms
+    // Get video info
+    const info = await ytdl.getInfo(url);
+    
+    // Get available formats
+    const formats = ytdl.filterFormats(info.formats, 'videoandaudio');
+    
+    // Extract unique qualities
+    const qualities = new Set();
+    const qualityFormats = {};
+    
+    formats.forEach(format => {
+      if (format.qualityLabel) {
+        const quality = format.qualityLabel.replace('p60', 'p'); // Normalize 60fps
+        qualities.add(quality);
+        
+        if (!qualityFormats[quality] || format.bitrate > qualityFormats[quality].bitrate) {
+          qualityFormats[quality] = format;
+        }
+      }
+    });
+
+    // Sort qualities (1080p, 720p, 480p, 360p, etc.)
+    const sortedQualities = Array.from(qualities).sort((a, b) => {
+      const aNum = parseInt(a);
+      const bNum = parseInt(b);
+      return bNum - aNum;
+    });
+
+    // Build quality options
+    const qualityOptions = sortedQualities.map(quality => ({
+      quality: quality,
+      format: 'mp4',
+      url: `/api/download?videoId=${videoId}&quality=${quality}`,
+      directDownload: true
+    }));
+
+    // Get video details
+    const videoDetails = info.videoDetails;
+
     return res.json({
       success: true,
-      platform: videoInfo.platform,
-      title: `${videoInfo.platform} Video`,
-      thumbnail: 'https://via.placeholder.com/640x360/667eea/ffffff?text=Video',
-      duration: 'Available',
-      author: 'Content Creator',
-      qualities: [
-        { 
-          quality: 'HD', 
-          format: 'mp4',
-          url: `/api/download-generic?url=${encodeURIComponent(url)}`,
-          directDownload: true
-        }
-      ],
-      note: `${videoInfo.platform} video detected`
+      platform: 'YouTube',
+      title: videoDetails.title,
+      thumbnail: videoDetails.thumbnails[videoDetails.thumbnails.length - 1].url,
+      duration: formatDuration(parseInt(videoDetails.lengthSeconds)),
+      author: videoDetails.author.name,
+      videoId: videoId,
+      qualities: qualityOptions,
+      note: 'Download will start automatically when you select a quality'
     });
 
   } catch (error) {
     console.error('Error:', error.message);
+    
+    if (error.message.includes('unavailable')) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Video is unavailable. It may be private, deleted, or region-blocked.' 
+      });
+    }
+    
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to process video' 
+      error: 'Failed to fetch video information. Please try again.' 
     });
   }
 });
 
-// Download endpoint using multiple services as fallback
+// Download video
 app.get('/api/download', async (req, res) => {
   try {
     const { videoId, quality } = req.query;
@@ -195,192 +166,68 @@ app.get('/api/download', async (req, res) => {
 
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Method 1: Try yt5s.io API (working alternative)
-    try {
-      console.log('Attempting download via yt5s.io...');
-      
-      // Step 1: Get video info from yt5s
-      const infoResponse = await axios.post(
-        'https://yt5s.io/api/ajaxSearch',
-        new URLSearchParams({
-          q: videoUrl,
-          vt: 'mp4'
-        }),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          timeout: 20000
-        }
-      );
-
-      if (infoResponse.data && infoResponse.data.status === 'ok') {
-        const links = infoResponse.data.links?.mp4;
-        
-        if (links) {
-          // Find the best matching quality
-          let selectedLink = null;
-          
-          if (quality === '1080' && links['1080']) {
-            selectedLink = links['1080'];
-          } else if (quality === '720' && links['720']) {
-            selectedLink = links['720'];
-          } else if (quality === '480' && links['480']) {
-            selectedLink = links['480'];
-          } else if (quality === '360' && links['360']) {
-            selectedLink = links['360'];
-          } else {
-            // Get the highest available quality
-            selectedLink = links['1080'] || links['720'] || links['480'] || links['360'] || links['144'];
-          }
-
-          if (selectedLink) {
-            const k = selectedLink.k;
-            
-            // Step 2: Get actual download link
-            const downloadResponse = await axios.post(
-              'https://yt5s.io/api/ajaxConvert',
-              new URLSearchParams({
-                vid: videoId,
-                k: k
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                timeout: 30000
-              }
-            );
-
-            if (downloadResponse.data && downloadResponse.data.status === 'ok') {
-              const downloadUrl = downloadResponse.data.dlink;
-              return res.redirect(downloadUrl);
-            }
-          }
-        }
-      }
-    } catch (yt5sError) {
-      console.error('yt5s.io failed:', yt5sError.message);
+    // Validate URL
+    if (!ytdl.validateURL(videoUrl)) {
+      return res.status(400).json({ error: 'Invalid video ID' });
     }
 
-    // Method 2: Try Y2Mate API
-    try {
-      console.log('Attempting download via Y2Mate...');
-      
-      const y2mateResponse = await axios.post(
-        'https://www.y2mate.com/mates/analyzeV2/ajax',
-        new URLSearchParams({
-          k_query: videoUrl,
-          k_page: 'home',
-          hl: 'en',
-          q_auto: '0'
-        }),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          timeout: 20000
-        }
-      );
+    console.log(`Starting download: ${videoId} at ${quality}`);
 
-      if (y2mateResponse.data && y2mateResponse.data.status === 'ok') {
-        const links = y2mateResponse.data.links?.mp4;
-        
-        if (links) {
-          let selectedKey = null;
-          
-          // Find matching quality
-          for (const [key, value] of Object.entries(links)) {
-            if (value.q === `${quality}p` || value.q === quality) {
-              selectedKey = value.k;
-              break;
-            }
-          }
-
-          if (!selectedKey) {
-            // Get first available
-            selectedKey = Object.values(links)[0]?.k;
-          }
-
-          if (selectedKey) {
-            const convertResponse = await axios.post(
-              'https://www.y2mate.com/mates/convertV2/index',
-              new URLSearchParams({
-                vid: videoId,
-                k: selectedKey
-              }),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                timeout: 30000
-              }
-            );
-
-            if (convertResponse.data && convertResponse.data.dlink) {
-              return res.redirect(convertResponse.data.dlink);
-            }
-          }
-        }
-      }
-    } catch (y2mateError) {
-      console.error('Y2Mate failed:', y2mateError.message);
+    // Get video info
+    const info = await ytdl.getInfo(videoUrl);
+    const videoTitle = info.videoDetails.title.replace(/[^\w\s-]/g, '').substring(0, 50);
+    
+    // Find the best format matching the quality
+    let format;
+    const formats = ytdl.filterFormats(info.formats, 'videoandaudio');
+    
+    // Try to find exact quality match
+    format = formats.find(f => f.qualityLabel === quality);
+    
+    // If not found, get closest quality
+    if (!format) {
+      const qualityNum = parseInt(quality);
+      format = formats
+        .filter(f => f.qualityLabel)
+        .sort((a, b) => {
+          const aDiff = Math.abs(parseInt(a.qualityLabel) - qualityNum);
+          const bDiff = Math.abs(parseInt(b.qualityLabel) - qualityNum);
+          return aDiff - bDiff;
+        })[0];
     }
 
-    // Method 3: Try loader.to API
-    try {
-      console.log('Attempting download via loader.to...');
-      
-      const loaderResponse = await axios.get(
-        `https://loader.to/ajax/download.php?format=${quality}p&url=${encodeURIComponent(videoUrl)}`,
-        { timeout: 20000 }
-      );
-
-      if (loaderResponse.data && loaderResponse.data.download_url) {
-        return res.redirect(loaderResponse.data.download_url);
-      }
-    } catch (loaderError) {
-      console.error('Loader.to failed:', loaderError.message);
+    // If still no format, use highest quality
+    if (!format) {
+      format = ytdl.chooseFormat(formats, { quality: 'highest' });
     }
 
-    // If all methods fail, return error
-    return res.status(503).json({ 
-      error: 'All download services are currently unavailable. Please try again in a few moments.',
-      suggestion: 'You can manually visit: https://yt5s.io or https://y2mate.com'
+    console.log(`Selected format: ${format.qualityLabel || 'best available'}`);
+
+    // Set headers for download
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${videoTitle}.mp4"`);
+
+    // Stream the video directly to response
+    const videoStream = ytdl(videoUrl, { format });
+    
+    videoStream.on('error', (error) => {
+      console.error('Stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Download failed' });
+      }
     });
+
+    videoStream.pipe(res);
 
   } catch (error) {
     console.error('Download error:', error.message);
-    res.status(500).json({ 
-      error: 'Download failed. Please try again.',
-      details: error.message 
-    });
-  }
-});
-
-// Generic download for other platforms
-app.get('/api/download-generic', async (req, res) => {
-  try {
-    const { url } = req.query;
-
-    if (!url) {
-      return res.status(400).json({ error: 'URL required' });
+    
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Download failed. Please try again.',
+        details: error.message 
+      });
     }
-
-    // Try using a generic video download service
-    const response = await axios.get(
-      `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-      { timeout: 15000 }
-    );
-
-    res.json({ 
-      message: 'This platform is not yet fully supported. Use the original URL.',
-      url: url
-    });
-
-  } catch (error) {
-    console.error('Generic download error:', error.message);
-    res.status(500).json({ error: 'Download not available for this platform yet' });
   }
 });
 
@@ -388,7 +235,7 @@ app.get('/api/download-generic', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Video Downloader API running on port ${PORT}`);
   console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`✅ Using yt5s.io, Y2Mate, and Loader.to as download services`);
+  console.log(`✅ Using ytdl-core for reliable downloads`);
 });
 
 module.exports = app;
