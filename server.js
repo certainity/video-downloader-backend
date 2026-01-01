@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 // RapidAPI Configuration for YouTube Video FAST Downloader 24/7
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'YOUR_RAPIDAPI_KEY_HERE';
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6';
 const RAPIDAPI_HOST = 'youtube-video-fast-downloader-24-7.p.rapidapi.com';
 
 // Helper to extract video ID

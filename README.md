@@ -7,7 +7,7 @@ You're using: **YouTube Video FAST Downloader 24/7**
 API Details:
 - **Host**: `youtube-video-fast-downloader-24-7.p.rapidapi.com`
 - **Endpoint**: `/download_video/{videoId}`
-- **Your API Key**: `dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN`
+- **Your API Key**: `bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6`
 
 ## 🚀 Quick Setup
 
@@ -23,18 +23,18 @@ mv server-fast-downloader.js server.js
 **For Local Development:**
 ```bash
 # Linux/Mac
-export RAPIDAPI_KEY="dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN"
+export RAPIDAPI_KEY="bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6"
 
 # Windows CMD
-set RAPIDAPI_KEY=dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN
+set RAPIDAPI_KEY=bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6
 
 # Windows PowerShell
-$env:RAPIDAPI_KEY="dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN"
+$env:RAPIDAPI_KEY="bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6"
 ```
 
 **Or create `.env` file:**
 ```env
-RAPIDAPI_KEY=dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN
+RAPIDAPI_KEY=bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6
 PORT=5000
 ```
 
@@ -110,7 +110,7 @@ This new server uses the correct endpoint for your API.
 
 ### "Invalid API Key"
 - Make sure key has no extra spaces
-- Copy exactly: `dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN`
+- Copy exactly: `bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6`
 - Check environment variable is set: `echo $RAPIDAPI_KEY`
 
 ### "Rate Limit Exceeded"
@@ -134,7 +134,7 @@ git push
 
 3. **Add Environment Variable**
 - Key: `RAPIDAPI_KEY`
-- Value: `dWqXZrGuX1mshGXir9X0iv4JIk6VpvISvlqqjsnoECIJADLXNuN`
+- Value: `bc7d17dd7fmshd4cb6ada6e4b24cp1f4f25jsn95791286a8d6`
 
 4. **Deploy!**
 
