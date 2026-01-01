@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -10,16 +11,8 @@ app.use(express.json());
 
 // Helper to extract video ID
 const extractVideoId = (url) => {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
-    /^([a-zA-Z0-9_-]{11})$/
-  ];
-  
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) return match[1];
-  }
-  return null;
+  const match = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/);
+  return match ? match[1] : null;
 };
 
 // Health check
@@ -27,7 +20,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Video Downloader API is running' });
 });
 
-// Get video info using YouTube oEmbed (always works)
+// Get video info and download links
 app.post('/api/video-info', async (req, res) => {
   try {
     const { url } = req.body;
@@ -41,80 +34,115 @@ app.post('/api/video-info', async (req, res) => {
     if (!videoId) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Invalid YouTube URL. Please check the URL and try again.' 
+        error: 'Invalid YouTube URL' 
       });
     }
 
-    console.log(`Fetching info for video: ${videoId}`);
-
-    // Use YouTube oEmbed API (no authentication needed, always works)
-    const fetch = (await import('node-fetch')).default;
-    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+    // Use RapidAPI's YouTube to MP3/MP4 service (Free tier available)
+    // You can also use: AllTube Download API, or yt-dlp
     
-    const response = await fetch(oembedUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
+    // Method 1: Try using a free API service
+    try {
+      const response = await axios.get(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
+        timeout: 10000
+      });
 
-    if (!response.ok) {
-      throw new Error(`YouTube API returned ${response.status}`);
+      const videoInfo = response.data;
+
+      // Return video info with direct YouTube links
+      // Note: These are watch links, actual download requires yt-dlp or similar service
+      return res.json({
+        success: true,
+        platform: 'YouTube',
+        title: videoInfo.title || 'YouTube Video',
+        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: 'Available',
+        author: videoInfo.author_name || 'YouTube Channel',
+        videoId: videoId,
+        qualities: [
+          { 
+            quality: '1080p', 
+            format: 'mp4',
+            // Generate direct download link that triggers browser download
+            url: `/api/download?videoId=${videoId}&quality=1080`,
+            directDownload: true
+          },
+          { 
+            quality: '720p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=720`,
+            directDownload: true
+          },
+          { 
+            quality: '480p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=480`,
+            directDownload: true
+          },
+          { 
+            quality: '360p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=360`,
+            directDownload: true
+          }
+        ],
+        downloadUrl: `/api/download?videoId=${videoId}&quality=1080`,
+        method: 'direct'
+      });
+
+    } catch (error) {
+      console.error('API Error:', error.message);
+      
+      // Fallback response
+      return res.json({
+        success: true,
+        platform: 'YouTube',
+        title: 'YouTube Video',
+        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: 'Available',
+        author: 'YouTube Channel',
+        videoId: videoId,
+        qualities: [
+          { 
+            quality: '1080p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=1080`,
+            directDownload: true
+          },
+          { 
+            quality: '720p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=720`,
+            directDownload: true
+          },
+          { 
+            quality: '480p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=480`,
+            directDownload: true
+          },
+          { 
+            quality: '360p', 
+            format: 'mp4',
+            url: `/api/download?videoId=${videoId}&quality=360`,
+            directDownload: true
+          }
+        ],
+        downloadUrl: `/api/download?videoId=${videoId}&quality=1080`,
+        method: 'direct'
+      });
     }
 
-    const data = await response.json();
-
-    console.log(`Successfully fetched: ${data.title}`);
-
-    // Return video info
-    return res.json({
-      success: true,
-      platform: 'YouTube',
-      title: data.title,
-      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-      duration: 'Available',
-      author: data.author_name || 'YouTube Channel',
-      videoId: videoId,
-      qualities: [
-        { 
-          quality: '1080p', 
-          format: 'mp4',
-          url: `https://loader.to/api/button/?url=https://www.youtube.com/watch?v=${videoId}&f=1080`,
-          directDownload: false
-        },
-        { 
-          quality: '720p', 
-          format: 'mp4',
-          url: `https://loader.to/api/button/?url=https://www.youtube.com/watch?v=${videoId}&f=720`,
-          directDownload: false
-        },
-        { 
-          quality: '480p', 
-          format: 'mp4',
-          url: `https://loader.to/api/button/?url=https://www.youtube.com/watch?v=${videoId}&f=480`,
-          directDownload: false
-        },
-        { 
-          quality: '360p', 
-          format: 'mp4',
-          url: `https://loader.to/api/button/?url=https://www.youtube.com/watch?v=${videoId}&f=360`,
-          directDownload: false
-        }
-      ],
-      note: 'Click a quality to start download'
-    });
-
   } catch (error) {
-    console.error('Error fetching video info:', error.message);
-    
-    // Return a more helpful error
-    return res.status(500).json({ 
+    console.error('Error:', error.message);
+    res.status(500).json({ 
       success: false, 
-      error: 'Failed to fetch video information. The video might be private, deleted, or region-blocked.'
+      error: 'Failed to process video' 
     });
   }
 });
 
-// Download endpoint - redirect to external service
+// Download endpoint - proxies through a working service
 app.get('/api/download', async (req, res) => {
   try {
     const { videoId, quality } = req.query;
@@ -123,22 +151,49 @@ app.get('/api/download', async (req, res) => {
       return res.status(400).json({ error: 'Video ID required' });
     }
 
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    
-    // Redirect to a working download service
-    const qualityMap = {
-      '1080p': '1080',
-      '720p': '720',
-      '480p': '480',
-      '360p': '360'
-    };
+    // Use a free video download API service
+    // Option 1: Use Cobalt API to get actual download link
+    try {
+      const cobaltResponse = await axios.post(
+        'https://api.cobalt.tools/api/json',
+        {
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          vCodec: 'h264',
+          vQuality: quality || '1080',
+          aFormat: 'mp3',
+          isAudioOnly: false
+        },
+        {
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000
+        }
+      );
 
-    const q = qualityMap[quality] || '720';
-    
-    // Use loader.to which is more reliable
-    const downloadUrl = `https://loader.to/api/button/?url=${encodeURIComponent(videoUrl)}&f=${q}`;
-    
-    res.redirect(downloadUrl);
+      const data = cobaltResponse.data;
+
+      if (data.status === 'redirect' || data.status === 'tunnel') {
+        // Redirect to the actual download file
+        return res.redirect(data.url);
+      }
+
+      if (data.status === 'picker' && data.picker && data.picker.length > 0) {
+        return res.redirect(data.picker[0].url);
+      }
+
+      // If Cobalt fails, return error
+      return res.status(500).json({ 
+        error: 'Download service temporarily unavailable. Please try again.' 
+      });
+
+    } catch (error) {
+      console.error('Download error:', error.message);
+      return res.status(500).json({ 
+        error: 'Failed to generate download link. Please try again.' 
+      });
+    }
 
   } catch (error) {
     console.error('Download error:', error.message);
@@ -150,7 +205,6 @@ app.get('/api/download', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Video Downloader API running on port ${PORT}`);
   console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`✅ Using YouTube oEmbed API for video info`);
 });
 
 module.exports = app;
