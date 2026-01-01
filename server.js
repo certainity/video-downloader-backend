@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const ytdl = require('ytdl-core');
 const axios = require('axios');
 
 const app = express();
@@ -23,6 +24,19 @@ const extractVideoId = (url) => {
   return null;
 };
 
+// Format duration
+const formatDuration = (seconds) => {
+  if (!seconds) return 'Available';
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
@@ -37,8 +51,6 @@ app.post('/api/video-info', async (req, res) => {
   try {
     const { url } = req.body;
 
-    console.log('Received request for URL:', url);
-
     if (!url) {
       return res.status(400).json({ success: false, error: 'URL is required' });
     }
@@ -46,168 +58,225 @@ app.post('/api/video-info', async (req, res) => {
     const videoId = extractVideoId(url);
     
     if (!videoId) {
-      console.log('Invalid video ID extracted from:', url);
       return res.status(400).json({ 
         success: false, 
         error: 'Invalid YouTube URL. Please enter a valid YouTube video link.' 
       });
     }
 
-    console.log('Extracted video ID:', videoId);
+    console.log(`Fetching info for video: ${videoId}`);
 
-    // Try to get video info from YouTube oEmbed
-    try {
-      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-      console.log('Fetching from oEmbed:', oembedUrl);
-      
-      const response = await axios.get(oembedUrl, {
-        timeout: 10000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      });
-
-      const data = response.data;
-      console.log('Successfully fetched video:', data.title);
-
-      // Generate download URLs using ssyoutube.com method
-      const ssUrl = `https://www.ssyoutube.com/watch?v=${videoId}`;
-
-      return res.json({
-        success: true,
-        platform: 'YouTube',
-        title: data.title,
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 'Available',
-        author: data.author_name || 'YouTube Channel',
-        videoId: videoId,
-        qualities: [
-          { 
-            quality: '1080p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '720p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '480p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '360p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          }
-        ],
-        note: 'Click any quality to open download page',
-        method: 'ssyoutube'
-      });
-
-    } catch (error) {
-      console.error('oEmbed fetch failed:', error.message);
-      
-      // Fallback response
-      const ssUrl = `https://www.ssyoutube.com/watch?v=${videoId}`;
-      
-      return res.json({
-        success: true,
-        platform: 'YouTube',
-        title: 'YouTube Video',
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 'Available',
-        author: 'YouTube Channel',
-        videoId: videoId,
-        qualities: [
-          { 
-            quality: '1080p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '720p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '480p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          },
-          { 
-            quality: '360p', 
-            format: 'mp4',
-            url: ssUrl,
-            directDownload: false,
-            external: true
-          }
-        ],
-        note: 'Click any quality to open download page',
-        method: 'ssyoutube_fallback'
+    // Validate URL
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    
+    if (!ytdl.validateURL(videoUrl)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid YouTube URL' 
       });
     }
 
+    // Get video info
+    const info = await ytdl.getInfo(videoUrl);
+    const videoDetails = info.videoDetails;
+
+    // Get formats with both video and audio
+    const formats = ytdl.filterFormats(info.formats, 'videoandaudio');
+    
+    // Extract unique qualities
+    const qualityMap = new Map();
+    
+    formats.forEach(format => {
+      if (format.qualityLabel) {
+        const quality = format.qualityLabel;
+        const height = parseInt(quality);
+        
+        if (!qualityMap.has(quality) || format.bitrate > qualityMap.get(quality).bitrate) {
+          qualityMap.set(quality, {
+            quality: quality,
+            itag: format.itag,
+            bitrate: format.bitrate,
+            height: height
+          });
+        }
+      }
+    });
+
+    // Convert to array and sort by height (highest first)
+    let qualities = Array.from(qualityMap.values())
+      .sort((a, b) => b.height - a.height)
+      .map(q => ({
+        quality: q.quality,
+        format: 'mp4',
+        url: `/api/download?videoId=${videoId}&itag=${q.itag}`,
+        directDownload: true
+      }));
+
+    // If no qualities found, provide defaults
+    if (qualities.length === 0) {
+      qualities = [
+        { 
+          quality: '720p', 
+          format: 'mp4',
+          url: `/api/download?videoId=${videoId}&quality=highest`,
+          directDownload: true
+        },
+        { 
+          quality: '480p', 
+          format: 'mp4',
+          url: `/api/download?videoId=${videoId}&quality=medium`,
+          directDownload: true
+        },
+        { 
+          quality: '360p', 
+          format: 'mp4',
+          url: `/api/download?videoId=${videoId}&quality=lowest`,
+          directDownload: true
+        }
+      ];
+    }
+
+    console.log(`Successfully fetched: ${videoDetails.title}`);
+
+    return res.json({
+      success: true,
+      platform: 'YouTube',
+      title: videoDetails.title,
+      thumbnail: videoDetails.thumbnails[videoDetails.thumbnails.length - 1]?.url || 
+                 `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: formatDuration(parseInt(videoDetails.lengthSeconds)),
+      author: videoDetails.author?.name || videoDetails.ownerChannelName || 'YouTube Channel',
+      videoId: videoId,
+      qualities: qualities,
+      note: 'Direct download from server'
+    });
+
   } catch (error) {
-    console.error('Error in video-info endpoint:', error);
-    res.status(500).json({ 
+    console.error('Error fetching video info:', error.message);
+    
+    // Check if it's an availability error
+    if (error.message.includes('unavailable')) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Video is unavailable. It may be private, deleted, or region-blocked.' 
+      });
+    }
+    
+    if (error.message.includes('Sign in')) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'This video requires authentication. Age-restricted videos are not supported.' 
+      });
+    }
+
+    return res.status(500).json({ 
       success: false, 
-      error: 'Failed to process video. Please try again.'
+      error: 'Failed to fetch video information. Please try again.' 
     });
   }
 });
 
-// Download endpoint
+// Download video
 app.get('/api/download', async (req, res) => {
   try {
-    const { videoId } = req.query;
+    const { videoId, itag, quality } = req.query;
 
     if (!videoId) {
       return res.status(400).json({ error: 'Video ID required' });
     }
 
-    // Redirect to ssyoutube.com
-    const redirectUrl = `https://www.ssyoutube.com/watch?v=${videoId}`;
-    console.log('Redirecting to:', redirectUrl);
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
-    res.redirect(redirectUrl);
+    console.log(`Starting download: ${videoId}`);
+
+    // Validate URL
+    if (!ytdl.validateURL(videoUrl)) {
+      return res.status(400).json({ error: 'Invalid video URL' });
+    }
+
+    // Get video info to get title
+    const info = await ytdl.getInfo(videoUrl);
+    const title = info.videoDetails.title.replace(/[^\w\s-]/g, '').substring(0, 50);
+
+    // Determine format options
+    let formatOptions = {};
+    
+    if (itag) {
+      formatOptions = { quality: itag };
+    } else if (quality === 'highest') {
+      formatOptions = { quality: 'highestvideo' };
+    } else if (quality === 'medium') {
+      formatOptions = { quality: 'medium' };
+    } else if (quality === 'lowest') {
+      formatOptions = { quality: 'lowestvideo' };
+    } else {
+      formatOptions = { quality: 'highest' };
+    }
+
+    // Set response headers for download
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${title}.mp4"`);
+
+    console.log(`Streaming video: ${title}`);
+
+    // Create video stream
+    const videoStream = ytdl(videoUrl, {
+      ...formatOptions,
+      filter: 'videoandaudio'
+    });
+
+    // Handle stream errors
+    videoStream.on('error', (error) => {
+      console.error('Stream error:', error.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Download failed. Please try again.' });
+      }
+    });
+
+    // Log progress
+    videoStream.on('progress', (chunkLength, downloaded, total) => {
+      const percent = (downloaded / total * 100).toFixed(1);
+      console.log(`Download progress: ${percent}%`);
+    });
+
+    videoStream.on('end', () => {
+      console.log('Download completed successfully');
+    });
+
+    // Pipe video to response
+    videoStream.pipe(res);
 
   } catch (error) {
     console.error('Download error:', error.message);
-    res.status(500).json({ error: 'Download failed' });
+    
+    if (!res.headersSent) {
+      if (error.message.includes('unavailable')) {
+        res.status(404).json({ error: 'Video unavailable' });
+      } else if (error.message.includes('No such format')) {
+        res.status(400).json({ error: 'Requested quality not available' });
+      } else {
+        res.status(500).json({ error: 'Download failed. Please try again.' });
+      }
+    }
   }
 });
 
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
-  res.status(500).json({ 
-    success: false, 
-    error: 'Internal server error' 
-  });
+  if (!res.headersSent) {
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
 });
 
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Video Downloader API running on port ${PORT}`);
   console.log(`📝 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`✅ Ready to accept requests`);
+  console.log(`✅ Using ytdl-core v${require('ytdl-core/package.json').version}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
